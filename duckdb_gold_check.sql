@@ -36,3 +36,9 @@ SELECT * FROM delta_scan('s3://lakehouse/gold/alert_history/') LIMIT 200;
 SELECT * FROM delta_scan('s3://lakehouse/gold/pipeline_quality/') LIMIT 200;
 SELECT * FROM delta_scan('s3://lakehouse/gold/prediction_current/') LIMIT 200;
 SELECT * FROM delta_scan('s3://lakehouse/gold/prediction_history/') LIMIT 200;
+
+SELECT * FROM delta_scan('s3://lakehouse/gold/alert_current_phm/') LIMIT 200;
+SELECT * FROM delta_scan('s3://lakehouse/gold/alert_history_phm/') LIMIT 200;
+SELECT * FROM delta_scan('s3://lakehouse/gold/pipeline_quality_phm/') LIMIT 200;
+SELECT * FROM delta_scan('s3://lakehouse/gold/prediction_current_phm/') LIMIT 200;
+SELECT * FROM delta_scan('s3://lakehouse/gold/prediction_history_phm/') LIMIT 200;

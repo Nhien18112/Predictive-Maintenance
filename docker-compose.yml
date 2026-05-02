@@ -10,7 +10,7 @@ services:
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin123
-    profiles: ["bronze", "train"]
+    profiles: ["bronze", "train", "bronze-phm", "ops-phm", "ops", "dashboard"]
 
   minio-init:
     image: minio/mc:RELEASE.2025-01-17T23-25-50Z
@@ -26,7 +26,7 @@ services:
         mc mb -p local/lakehouse || true
         mc mb -p local/checkpoints || true
         echo "MinIO buckets are ready"
-    profiles: ["bronze", "train"]
+    profiles: ["bronze", "train", "bronze-phm", "ops-phm", "ops", "dashboard"]
 
   emqx:
     image: emqx/emqx:6.1.1
@@ -297,7 +297,9 @@ services:
         sed -i 's/\r$//' /app/dashboard/superset/init_superset.sh && \
         bash /app/dashboard/superset/init_superset.sh && \
         python /app/dashboard/superset/bootstrap_dashboard.py && \
-        python /app/dashboard/superset/bootstrap_charts.py
+        python /app/dashboard/superset/bootstrap_charts.py && \
+        python /app/dashboard/superset/bootstrap_dashboard_phm.py && \
+        python /app/dashboard/superset/bootstrap_charts_phm.py
     environment:
       SUPERSET_SECRET_KEY: pdm-superset-secret
       SUPERSET_LOAD_EXAMPLES: "no"
@@ -329,6 +331,141 @@ services:
       - dashboard-db
     restart: unless-stopped
     profiles: ["dashboard"]
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.mlflow
+    image: predictive-maintenance-mlflow:2.11.3
+    command:
+      - /bin/sh
+      - -c
+      - |
+        mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:////tmp/mlflow.db --default-artifact-root s3://lakehouse/mlflow/
+    ports:
+      - "5000:5000"
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin123
+    volumes:
+      - ./:/app
+    depends_on:
+      - minio
+      - minio-init
+    profiles: ["ops-phm", "train", "ops"]
+
+  mqtt-kafka-bridge-phm:
+    image: python:3.11-slim
+    working_dir: /app
+    environment:
+      PYTHONUNBUFFERED: "1"
+    command:
+      - /bin/sh
+      - -c
+      - |
+        pip install --no-cache-dir -r simulator/requirements.txt && \
+        python -u simulator/mqtt_to_kafka_bridge_phm.py \
+          --mqtt-broker emqx \
+          --mqtt-port 1883 \
+          --mqtt-topic factory/pdm/phm/raw \
+          --kafka-bootstrap kafka:9092 \
+          --raw-topic pdm.phm.raw \
+          --dlq-topic pdm.phm.raw.dlq
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+    depends_on:
+      emqx:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    profiles: ["ingest-phm"]
+
+  bronze-telemetry-phm:
+    image: apache/spark:3.5.1
+    working_dir: /app
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        mkdir -p /tmp/.ivy2/cache /tmp/.ivy2/jars && \
+        /opt/spark/bin/spark-submit \
+          --conf spark.jars.ivy=/tmp/.ivy2 \
+          --packages io.delta:delta-spark_2.12:3.2.0,org.apache.hadoop:hadoop-aws:3.3.4,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1 \
+          /app/spark/stream_bronze_telemetry_phm.py
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      BRONZE_RAW_TOPIC: pdm.phm.raw
+      BRONZE_DLQ_TOPIC: pdm.phm.raw.dlq
+      KAFKA_STARTING_OFFSETS: earliest
+      KAFKA_FAIL_ON_DATA_LOSS: "false"
+      KAFKA_MAX_OFFSETS_PER_TRIGGER: "5000"
+      BRONZE_TRIGGER_INTERVAL: 10 seconds
+      BRONZE_RAW_DELTA_PATH: s3a://lakehouse/bronze/phm_raw/
+      BRONZE_DLQ_DELTA_PATH: s3a://lakehouse/bronze/phm_dlq/
+      BRONZE_RAW_CHECKPOINT_PATH: s3a://checkpoints/bronze/phm_raw/
+      BRONZE_DLQ_CHECKPOINT_PATH: s3a://checkpoints/bronze/phm_dlq/
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+      SPARK_LOG_LEVEL: WARN
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+    depends_on:
+      - kafka
+      - minio
+      - minio-init
+    profiles: ["bronze-phm"]
+
+  silver-gold-phm:
+    build:
+      context: .
+      dockerfile: Dockerfile.ops
+    user: "0"
+    working_dir: /app
+    command:
+      - /bin/bash
+      - -lc
+      - |
+        mkdir -p /tmp/.ivy2/cache /tmp/.ivy2/jars && \
+        spark-submit \
+          --conf spark.jars.ivy=/tmp/.ivy2 \
+          --conf spark.driver.memory=2g \
+          --conf spark.sql.shuffle.partitions=4 \
+          --conf spark.default.parallelism=4 \
+          --conf spark.sql.streaming.forceDeleteTempCheckpointLocation=true \
+          --packages io.delta:delta-spark_2.12:3.2.0,org.apache.hadoop:hadoop-aws:3.3.4 \
+          /app/spark/stream_silver_gold_phm.py
+    environment:
+      BRONZE_RAW_DELTA_PATH: s3a://lakehouse/bronze/phm_raw/
+      SILVER_STREAM_CLEAN_PATH: s3a://lakehouse/silver/phm_stream_clean/
+      SILVER_STREAM_CHECKPOINT_PATH: s3a://checkpoints/silver/phm_stream_clean/
+      SILVER_STREAM_TRIGGER_INTERVAL: 15 seconds
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      GOLD_PREDICTION_CURRENT_PATH: s3a://lakehouse/gold/prediction_current_phm/
+      GOLD_PREDICTION_HISTORY_PATH: s3a://lakehouse/gold/prediction_history_phm/
+      GOLD_ALERT_CURRENT_PATH: s3a://lakehouse/gold/alert_current_phm/
+      GOLD_ALERT_HISTORY_PATH: s3a://lakehouse/gold/alert_history_phm/
+      GOLD_PIPELINE_QUALITY_PATH: s3a://lakehouse/gold/pipeline_quality_phm/
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+      SPARK_LOG_LEVEL: WARN
+      TF_CPP_MIN_LOG_LEVEL: "2"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin123
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+    volumes:
+      - ./:/app
+    restart: unless-stopped
+    depends_on:
+      - bronze-telemetry-phm
+      - minio
+      - minio-init
+      - mlflow
+    profiles: ["ops-phm"]
 
 
 volumes:

@@ -23,6 +23,10 @@ def main() -> int:
             "gold_alert_history",
             "v_alert_reason_parsed",
             "v_symptom_details_parsed",
+            "v_phm_machine_snapshot",
+            "gold_prediction_history_phm",
+            "gold_alert_history_phm",
+            "v_phm_top_risk",
         ]
 
         for name in table_names:

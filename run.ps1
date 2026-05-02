@@ -8,8 +8,8 @@ param(
         "up-ops", "down-ops",
         "up-dashboard", "down-dashboard", "refresh-superset",
         "build-train-silver-gold", "down-train",
-        "up-all", "down-all",
-        "replay",
+        "up-all", "down-all", "up-phm", "down-phm", "train-phm",
+        "replay", "replay-phm",
         "consume-raw", "consume-dlq",
         "logs", "status", "health",
         "up", "bridge", "bronze", "down", "all"
@@ -48,12 +48,15 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
+$script:PythonExe = $null
+
 # docker compose only resolves profiled services when those profiles are enabled (ps/logs/exec).
 $script:ComposeProfileCore = @("--profile", "core")
 $script:ComposeProfileCoreIngest = @("--profile", "core", "--profile", "ingest")
 $script:ComposeProfileAll = @(
     "--profile", "core", "--profile", "ingest", "--profile", "bronze",
-    "--profile", "ops", "--profile", "train", "--profile", "dashboard"
+    "--profile", "ops", "--profile", "train", "--profile", "dashboard",
+    "--profile", "ingest-phm", "--profile", "bronze-phm", "--profile", "ops-phm"
 )
 
 function Write-Step([string]$Message) {
@@ -64,6 +67,34 @@ function Ensure-Command([string]$CommandName) {
     if (-not (Get-Command $CommandName -ErrorAction SilentlyContinue)) {
         throw "Missing required command: $CommandName"
     }
+}
+
+function Get-PythonExe {
+    if ($script:PythonExe) {
+        return $script:PythonExe
+    }
+
+    if ($env:VIRTUAL_ENV) {
+        $activeVenvPython = Join-Path $env:VIRTUAL_ENV "Scripts\python.exe"
+        if (Test-Path $activeVenvPython) {
+            $script:PythonExe = $activeVenvPython
+            return $script:PythonExe
+        }
+    }
+
+    $repoVenvPython = Join-Path $PSScriptRoot "venv\Scripts\python.exe"
+    if (Test-Path $repoVenvPython) {
+        $script:PythonExe = $repoVenvPython
+        return $script:PythonExe
+    }
+
+    $cmd = Get-Command "python" -ErrorAction SilentlyContinue
+    if ($cmd) {
+        $script:PythonExe = $cmd.Source
+        return $script:PythonExe
+    }
+
+    throw "Missing required command: python"
 }
 
 function Invoke-Checked([scriptblock]$Script, [string]$ErrorMessage) {
@@ -83,8 +114,8 @@ function Remove-ConflictingContainers([string[]]$Names) {
 
 function Install-Dependencies {
     Write-Step "Installing Python dependencies"
-    Ensure-Command "python"
-    Invoke-Checked { python -m pip install -r "simulator/requirements.txt" } "Failed to install Python dependencies"
+    $pythonExe = Get-PythonExe
+    Invoke-Checked { & $pythonExe -m pip install -r "requirements.txt" } "Failed to install Python dependencies"
 }
 
 function Compose-UpCore {
@@ -106,9 +137,13 @@ function Wait-KafkaReady([int]$TimeoutSeconds = 90) {
 
     $start = Get-Date
     while (((Get-Date) - $start).TotalSeconds -lt $TimeoutSeconds) {
-        # Use compose service name (not fixed container_name) so project-prefixed names work
-        docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list *> $null
-        if ($LASTEXITCODE -eq 0) {
+        $topics = ""
+        try {
+            $topics = docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list 2>&1
+        } catch {
+            # Ignore errors while waiting
+        }
+        if ($LASTEXITCODE -eq 0 -and $topics -notmatch "Exception") {
             Write-Host "Kafka is ready" -ForegroundColor Green
             return
         }
@@ -122,29 +157,40 @@ function Ensure-KafkaTopic([string]$TopicName, [int]$Partitions = 4, [int]$Retri
     Ensure-Command "docker"
 
     for ($attempt = 1; $attempt -le $Retries; $attempt++) {
-        docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list *> $null
-        if ($LASTEXITCODE -ne 0) {
+        $topics = ""
+        try {
+            $topics = docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list 2>&1
+        } catch {}
+        
+        if ($LASTEXITCODE -ne 0 -or $topics -match "Exception") {
             Write-Host "Kafka metadata not ready (attempt $attempt/$Retries), retrying..." -ForegroundColor Yellow
             Start-Sleep -Seconds $DelaySeconds
             continue
         }
 
-        docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --topic $TopicName --describe *> $null
-        if ($LASTEXITCODE -eq 0) {
+        if (($topics -split "`r?`n") -contains $TopicName) {
             Write-Host "Topic '$TopicName' is ready" -ForegroundColor Green
             return
         }
 
-        docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh `
-            --bootstrap-server kafka:9092 `
-            --create --if-not-exists `
-            --topic $TopicName `
-            --partitions $Partitions `
-            --replication-factor 1 *> $null
+        try {
+            docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh `
+                --bootstrap-server kafka:9092 `
+                --create --if-not-exists `
+                --topic $TopicName `
+                --partitions $Partitions `
+                --replication-factor 1 2>&1 | Out-Null
+        } catch {}
 
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "Ensured topic '$TopicName'" -ForegroundColor Green
-            return
+            $topicsAfterCreate = ""
+            try {
+                $topicsAfterCreate = docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list 2>&1
+            } catch {}
+            if ($LASTEXITCODE -eq 0 -and (($topicsAfterCreate -split "`r?`n") -contains $TopicName)) {
+                Write-Host "Ensured topic '$TopicName'" -ForegroundColor Green
+                return
+            }
         }
 
         Write-Host "Topic '$TopicName' not ready yet (attempt $attempt/$Retries), retrying..." -ForegroundColor Yellow
@@ -268,14 +314,14 @@ function Build-TrainSilverGold {
 
 function Run-SplitTrainStream {
     Write-Step "Splitting full-life-cycle data into physical train/stream CSV files"
-    Ensure-Command "python"
+    $pythonExe = Get-PythonExe
 
     if (-not (Test-Path $FullLifecycleCsv)) {
         throw "Full lifecycle CSV not found: $FullLifecycleCsv"
     }
 
     Invoke-Checked {
-        python "scripts/split_train_stream_files.py" `
+        & $pythonExe "scripts/split_train_stream_files.py" `
             --input-csv "$FullLifecycleCsv" `
             --train-output-csv "$TrainHistoryCsv" `
             --stream-output-csv "$RawStreamingCsv" `
@@ -291,7 +337,7 @@ function Stop-TrainStage {
     Invoke-Checked { docker compose --profile train stop train-silver-gold minio-init minio } "Failed to stop train stage"
 }
 
-function Wait-BridgeReady([int]$TimeoutSeconds = 180) {
+function Wait-BridgeReady([int]$TimeoutSeconds = 600) {
     Write-Step "Waiting for bridge MQTT subscription"
     Ensure-Command "docker"
 
@@ -342,14 +388,14 @@ function Wait-BridgeReady([int]$TimeoutSeconds = 180) {
 
 function Run-Replay {
     Write-Step "Replaying CSV to MQTT"
-    Ensure-Command "python"
+    $pythonExe = Get-PythonExe
 
     if (-not (Test-Path $CsvPath)) {
         throw "CSV file not found: $CsvPath"
     }
 
     Invoke-Checked {
-        python "simulator/replay_mqtt_from_csv.py" `
+        & $pythonExe "simulator/replay_mqtt_from_csv.py" `
             --csv "$CsvPath" `
             --broker "$Broker" `
             --port $Port `
@@ -360,6 +406,100 @@ function Run-Replay {
             --replay-speed $ReplaySpeed `
             --max-rows $MaxRows
     } "Replay failed"
+}
+
+function Run-ReplayPhm {
+    Write-Step "Replaying PHM MQTT (all bearings in parallel)"
+    $pythonExe = Get-PythonExe
+    $projectRoot = $PSScriptRoot   # Absolute path to the project directory
+    $testSetPath = Join-Path $projectRoot "Data/phm-ieee-2012-data-challenge-dataset-master/Full_Test_Set"
+    $scriptPath  = Join-Path $projectRoot "simulator/replay_phm_mqtt.py"
+    $runId = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
+    $bearingFolders = Get-ChildItem $testSetPath -Directory | Select-Object -ExpandProperty FullName
+
+    if (-not $bearingFolders) {
+        throw "No bearing folders found in $testSetPath"
+    }
+
+    Write-Host "Found $($bearingFolders.Count) bearing(s): $($bearingFolders | ForEach-Object { Split-Path $_ -Leaf })" -ForegroundColor Cyan
+    Write-Host "Run ID: $runId" -ForegroundColor Cyan
+
+    $jobs = @()
+    foreach ($folder in $bearingFolders) {
+        $bearingName = Split-Path $folder -Leaf
+        Write-Host "  Starting replay for $bearingName..." -ForegroundColor Yellow
+        $jobs += Start-Job -ScriptBlock {
+            param($py, $script, $bf, $port, $root, $run)
+            Set-Location $root
+            & $py $script --bearing-folder $bf --port $port --delay 1.0 --run-id $run
+        } -ArgumentList $pythonExe, $scriptPath, $folder, 18831, $projectRoot, $runId
+    }
+
+    Write-Host "All $($jobs.Count) bearing simulators running. Press Ctrl+C to stop." -ForegroundColor Green
+    try {
+        # Stream output from all jobs until all complete
+        while ($jobs | Where-Object { $_.State -eq 'Running' }) {
+            $jobs | Receive-Job | ForEach-Object { Write-Host $_ }
+            Start-Sleep -Seconds 2
+        }
+        $jobs | Receive-Job | ForEach-Object { Write-Host $_ }
+    } finally {
+        $jobs | Stop-Job -ErrorAction SilentlyContinue
+        $jobs | Remove-Job -ErrorAction SilentlyContinue
+        Write-Host "All bearing simulators stopped." -ForegroundColor Yellow
+    }
+}
+
+function Run-ReplayPhmDlq {
+    Write-Step "Replaying PHM DLQ back to raw topic"
+    $pythonExe = Get-PythonExe
+    $scriptPath = Join-Path $PSScriptRoot "scripts/replay_phm_dlq.py"
+    & $pythonExe $scriptPath --bootstrap $KafkaBootstrap --from-beginning
+}
+
+function Run-TrainPhmWithRetry([string]$PythonExe, [int]$MaxRetries = 3) {
+    $oldOneDnn = $env:TF_ENABLE_ONEDNN_OPTS
+    $oldCuda = $env:CUDA_VISIBLE_DEVICES
+    $oldAwsKey = $env:AWS_ACCESS_KEY_ID
+    $oldAwsSecret = $env:AWS_SECRET_ACCESS_KEY
+    $oldS3Endpoint = $env:MLFLOW_S3_ENDPOINT_URL
+    $env:TF_ENABLE_ONEDNN_OPTS = "0"
+    $env:CUDA_VISIBLE_DEVICES = "-1"
+    $env:AWS_ACCESS_KEY_ID = "minioadmin"
+    $env:AWS_SECRET_ACCESS_KEY = "minioadmin123"
+    $env:MLFLOW_S3_ENDPOINT_URL = "http://localhost:9000"
+
+    try {
+        for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+            Write-Host "PHM training attempt $attempt/$MaxRetries..." -ForegroundColor Yellow
+            & $PythonExe "scripts/train_phm_model.py"
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "PHM training completed successfully." -ForegroundColor Green
+                return
+            }
+            if ($attempt -lt $MaxRetries) {
+                Write-Host "PHM training failed (attempt $attempt). Retrying..." -ForegroundColor Yellow
+            }
+        }
+    }
+    finally {
+        if ($null -eq $oldOneDnn) { Remove-Item Env:\TF_ENABLE_ONEDNN_OPTS -ErrorAction SilentlyContinue }
+        else { $env:TF_ENABLE_ONEDNN_OPTS = $oldOneDnn }
+
+        if ($null -eq $oldCuda) { Remove-Item Env:\CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue }
+        else { $env:CUDA_VISIBLE_DEVICES = $oldCuda }
+
+        if ($null -eq $oldAwsKey) { Remove-Item Env:\AWS_ACCESS_KEY_ID -ErrorAction SilentlyContinue }
+        else { $env:AWS_ACCESS_KEY_ID = $oldAwsKey }
+
+        if ($null -eq $oldAwsSecret) { Remove-Item Env:\AWS_SECRET_ACCESS_KEY -ErrorAction SilentlyContinue }
+        else { $env:AWS_SECRET_ACCESS_KEY = $oldAwsSecret }
+
+        if ($null -eq $oldS3Endpoint) { Remove-Item Env:\MLFLOW_S3_ENDPOINT_URL -ErrorAction SilentlyContinue }
+        else { $env:MLFLOW_S3_ENDPOINT_URL = $oldS3Endpoint }
+    }
+
+    throw "Train PHM failed"
 }
 
 function Consume-Raw {
@@ -502,6 +642,64 @@ switch ($NormalizedAction) {
     "down-ops" {
         Stop-Ops
     }
+    "up-phm" {
+        Compose-UpCore
+        Wait-KafkaReady
+        Ensure-KafkaTopic -TopicName "pdm.phm.raw"
+        Ensure-KafkaTopic -TopicName "pdm.phm.raw.dlq" -Partitions 1
+        Invoke-Checked { docker compose --profile core --profile ingest-phm --profile bronze-phm --profile ops-phm up -d mqtt-kafka-bridge-phm bronze-telemetry-phm mlflow silver-gold-phm } "Failed to start PHM stage"
+    }
+    "down-phm" {
+        Invoke-Checked { docker compose --profile ingest-phm --profile bronze-phm --profile ops-phm stop mqtt-kafka-bridge-phm bronze-telemetry-phm mlflow silver-gold-phm } "Failed to stop PHM stage"
+    }
+    "clean-phm" {
+        Write-Step "Cleaning PHM Data from MinIO, Kafka and PostgreSQL"
+        Invoke-Checked { docker exec predictive_maintenance-dashboard-db-1 psql -U pdm -d pdm_dashboard -c "TRUNCATE TABLE gold.gold_prediction_history_phm, gold.gold_prediction_current_phm, gold.gold_alert_history_phm, gold.gold_alert_current_phm;" } "Failed to truncate PostgreSQL tables"
+        
+        Write-Host "Deleting Kafka topic pdm.phm.raw..."
+        docker compose --profile core exec kafka /opt/kafka/bin/kafka-topics.sh --delete --topic pdm.phm.raw --bootstrap-server kafka:9092 2>$null
+        
+        Write-Host "Cleaning MinIO paths..."
+        docker compose exec minio mc rm -r --force myminio/lakehouse/bronze/phm_raw/ 2>$null
+        docker compose exec minio mc rm -r --force myminio/lakehouse/silver/phm_stream_clean/ 2>$null
+        docker compose exec minio mc rm -r --force myminio/checkpoints/bronze/phm_raw/ 2>$null
+        docker compose exec minio mc rm -r --force myminio/checkpoints/silver/phm_stream_clean/ 2>$null
+        
+        Write-Host "Cleaned successfully. Please restart the pipeline (down-phm then up-phm)." -ForegroundColor Green
+    }
+    "train-phm" {
+        $pythonExe = Get-PythonExe
+        Invoke-Checked { docker compose --profile core --profile bronze up -d minio minio-init } "Start MinIO failed"
+        Invoke-Checked { docker compose --profile train up -d mlflow } "Start MLflow failed"
+        
+        # Wait for MLflow to be healthy before training
+        Write-Step "Waiting for MLflow to be ready..."
+        $mlflowReady = $false
+        for ($i = 0; $i -lt 30; $i++) {
+            try {
+                $response = Invoke-WebRequest -Uri "http://localhost:5000/health" -UseBasicParsing -ErrorAction SilentlyContinue
+                if ($response.StatusCode -eq 200) {
+                    $mlflowReady = $true
+                    Write-Host "[OK] MLflow is ready" -ForegroundColor Green
+                    break
+                }
+            }
+            catch {
+                # Not ready yet
+            }
+            if ($i -lt 29) {
+                Write-Host "  Waiting... ($($i+1)/30)" -ForegroundColor Yellow
+                Start-Sleep -Seconds 1
+            }
+        }
+        
+        if (-not $mlflowReady) {
+            Write-Host "[WARN] MLflow health check failed, but proceeding with training (will use local mode if needed)" -ForegroundColor Yellow
+        }
+        
+        Write-Step "Training PHM LSTM model"
+        Run-TrainPhmWithRetry -PythonExe $pythonExe -MaxRetries 3
+    }
     "up-dashboard" {
         Compose-UpCore
         Wait-KafkaReady
@@ -537,6 +735,12 @@ switch ($NormalizedAction) {
     }
     "replay" {
         Run-Replay
+    }
+    "replay-phm" {
+        Run-ReplayPhm
+    }
+    "replay-phm-dlq" {
+        Run-ReplayPhmDlq
     }
     "consume-raw" {
         Consume-Raw

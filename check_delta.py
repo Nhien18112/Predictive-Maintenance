@@ -1,0 +1,13 @@
+import duckdb
+con = duckdb.connect(':memory:')
+con.execute('INSTALL httpfs;')
+con.execute('LOAD httpfs;')
+con.execute('INSTALL delta;')
+con.execute('LOAD delta;')
+con.execute("CREATE SECRET s3 (TYPE S3, KEY_ID 'minioadmin', SECRET 'minioadmin123', REGION 'us-east-1', ENDPOINT 'minio:9000', URL_STYLE 'path', USE_SSL false);")
+con.execute("SET s3_region='us-east-1';")
+con.execute("SET s3_url_style='path';")
+df = con.execute("SELECT * FROM delta_scan('s3://lakehouse/gold/prediction_history_phm/') LIMIT 1").fetchdf()
+print("prediction_history_phm columns:", df.columns)
+df2 = con.execute("SELECT * FROM delta_scan('s3://lakehouse/gold/prediction_current_phm/') LIMIT 1").fetchdf()
+print("prediction_current_phm columns:", df2.columns)

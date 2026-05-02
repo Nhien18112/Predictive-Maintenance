@@ -1,0 +1,12 @@
+# Host Machine (Data Science) Dependencies
+mlflow==2.11.3
+pandas
+numpy
+scipy
+scikit-learn
+tensorflow
+xgboost
+boto3
+paho-mqtt>=2.1.0
+kafka-python>=2.0.2
+requests

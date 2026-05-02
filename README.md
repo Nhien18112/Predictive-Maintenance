@@ -25,6 +25,9 @@ docker compose --profile core --profile bronze --profile ops build --no-cache si
 ---
 
 ## Chạy pipeline (thứ tự bắt buộc)
+Cần gõ lệnh để bypass:
+Set-ExecutionPolicy Bypass -Scope Process
+
 
 1. **Core + ingest** (EMQX, Kafka, bridge MQTT → Kafka)
 
