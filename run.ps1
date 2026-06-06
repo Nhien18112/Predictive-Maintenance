@@ -8,7 +8,7 @@ param(
         "up-ops", "down-ops",
         "up-dashboard", "down-dashboard", "refresh-superset",
         "build-train-silver-gold", "down-train",
-        "up-all", "down-all", "up-phm", "down-phm", "train-phm",
+        "up-all", "down-all", "up-phm", "down-phm", "train-phm", "clean-phm",
         "replay", "replay-phm",
         "consume-raw", "consume-dlq",
         "logs", "status", "health",
@@ -580,6 +580,46 @@ function Check-Health {
     }
 }
 
+function Clean-PhmData {
+    Write-Step "Cleaning PHM Data from MinIO, Kafka and PostgreSQL"
+    
+    # 1. Clean MinIO Data
+    Write-Host "Cleaning up MinIO Data & Checkpoints for PHM..." -ForegroundColor Yellow
+    $minioPaths = "local/checkpoints/bronze/phm_raw/ " +
+                  "local/checkpoints/bronze/phm_dlq/ " +
+                  "local/checkpoints/silver/phm_stream_clean/ " +
+                  "local/lakehouse/bronze/phm_raw/ " +
+                  "local/lakehouse/bronze/phm_dlq/ " +
+                  "local/lakehouse/silver/phm_stream_clean/ " +
+                  "local/lakehouse/gold/prediction_current_phm/ " +
+                  "local/lakehouse/gold/alert_current_phm/ " +
+                  "local/lakehouse/gold/pipeline_quality_phm/ " +
+                  "local/lakehouse/gold/prediction_history_phm/ " +
+                  "local/lakehouse/gold/alert_history_phm/"
+
+    # Ensure minio is running before executing commands
+    Invoke-Checked { docker compose --profile core --profile bronze-phm up -d minio } "Failed to start MinIO for reset"
+    $mcCommand = "mc alias set local http://localhost:9000 minioadmin minioadmin123 >/dev/null 2>&1 && mc rm -r --force $minioPaths >/dev/null 2>&1"
+    docker compose exec -T minio bash -c $mcCommand
+    
+    # 2. PostgreSQL
+    $dbContainerId = docker compose ps -q dashboard-db 2>$null
+    if ($dbContainerId) {
+        Write-Host "Truncating PHM tables in PostgreSQL..." -ForegroundColor Yellow
+        $tablesToTruncate = "gold.gold_prediction_history_phm, gold.gold_prediction_current_phm, gold.gold_alert_history_phm, gold.gold_alert_current_phm"
+        docker compose exec -T dashboard-db psql -U pdm -d pdm_dashboard -c "TRUNCATE TABLE $tablesToTruncate RESTART IDENTITY CASCADE;"
+    } else {
+        Write-Host "dashboard-db is not running. Skipping PostgreSQL truncate." -ForegroundColor DarkYellow
+    }
+
+    # 3. Kafka
+    Write-Host "Deleting Kafka topics pdm.phm.raw and pdm.phm.raw.dlq..." -ForegroundColor Yellow
+    docker compose --profile core exec -T kafka /opt/kafka/bin/kafka-topics.sh --delete --if-exists --topic pdm.phm.raw --bootstrap-server kafka:9092
+    docker compose --profile core exec -T kafka /opt/kafka/bin/kafka-topics.sh --delete --if-exists --topic pdm.phm.raw.dlq --bootstrap-server kafka:9092
+
+    Write-Host "PHM Reset Completed." -ForegroundColor Green
+}
+
 function Normalize-LegacyAction([string]$RequestedAction) {
     switch ($RequestedAction) {
         "up" { return "up-core" }
@@ -645,6 +685,10 @@ switch ($NormalizedAction) {
     "up-phm" {
         Compose-UpCore
         Wait-KafkaReady
+        
+        # Reset PHM data before starting the pipelines
+        Clean-PhmData
+        
         Ensure-KafkaTopic -TopicName "pdm.phm.raw"
         Ensure-KafkaTopic -TopicName "pdm.phm.raw.dlq" -Partitions 1
         Invoke-Checked { docker compose --profile core --profile ingest-phm --profile bronze-phm --profile ops-phm up -d mqtt-kafka-bridge-phm bronze-telemetry-phm mlflow silver-gold-phm } "Failed to start PHM stage"
@@ -653,19 +697,7 @@ switch ($NormalizedAction) {
         Invoke-Checked { docker compose --profile ingest-phm --profile bronze-phm --profile ops-phm stop mqtt-kafka-bridge-phm bronze-telemetry-phm mlflow silver-gold-phm } "Failed to stop PHM stage"
     }
     "clean-phm" {
-        Write-Step "Cleaning PHM Data from MinIO, Kafka and PostgreSQL"
-        Invoke-Checked { docker exec predictive_maintenance-dashboard-db-1 psql -U pdm -d pdm_dashboard -c "TRUNCATE TABLE gold.gold_prediction_history_phm, gold.gold_prediction_current_phm, gold.gold_alert_history_phm, gold.gold_alert_current_phm;" } "Failed to truncate PostgreSQL tables"
-        
-        Write-Host "Deleting Kafka topic pdm.phm.raw..."
-        docker compose --profile core exec kafka /opt/kafka/bin/kafka-topics.sh --delete --topic pdm.phm.raw --bootstrap-server kafka:9092 2>$null
-        
-        Write-Host "Cleaning MinIO paths..."
-        docker compose exec minio mc rm -r --force myminio/lakehouse/bronze/phm_raw/ 2>$null
-        docker compose exec minio mc rm -r --force myminio/lakehouse/silver/phm_stream_clean/ 2>$null
-        docker compose exec minio mc rm -r --force myminio/checkpoints/bronze/phm_raw/ 2>$null
-        docker compose exec minio mc rm -r --force myminio/checkpoints/silver/phm_stream_clean/ 2>$null
-        
-        Write-Host "Cleaned successfully. Please restart the pipeline (down-phm then up-phm)." -ForegroundColor Green
+        Clean-PhmData
     }
     "train-phm" {
         $pythonExe = Get-PythonExe

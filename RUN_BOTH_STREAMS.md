@@ -20,9 +20,11 @@ Set-ExecutionPolicy Bypass -Scope Process
 ```
 
 ## 3) Start PHM pipeline (ingest + bronze + ops + MLflow)
+*Note: Running `up-phm` will **automatically reset and clean** any previous PHM data from MinIO, PostgreSQL, and Kafka to ensure a fresh start.*
 ```powershell
 ./run.ps1 -Action up-phm
 ```
+*(If you ever need to manually clean the PHM data without starting the services, use `./run.ps1 -Action clean-phm`)*
 
 ## 4) Start dashboards
 ```powershell
