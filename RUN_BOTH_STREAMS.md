@@ -73,3 +73,23 @@ Data checks:
 ## Troubleshooting (common)
 - Follow logs: `./run.ps1 -Action logs -Service <service> -Follow`
 - If Superset charts are empty: run `./run.ps1 -Action refresh-superset` after data exists.
+
+
+Restart your Docker containers so the Superset fix applies:
+
+powershell
+./run.ps1 -Action down-dashboard
+./run.ps1 -Action up-dashboard
+Open a new terminal and install the new Flask requirement:
+
+powershell
+pip install -r requirements.txt
+Start your new web portal server!
+
+powershell
+cd ui-portal
+python app.py
+Go to http://localhost:5000 in your web browser. You'll be presented with your new login screen!
+
+Username: admin
+Password: password123

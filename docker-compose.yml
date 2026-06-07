@@ -267,7 +267,7 @@ services:
       - /bin/bash
       - -lc
       - |
-        pip install --no-cache-dir psycopg2-binary==2.9.10 && \
+        pip install --no-cache-dir psycopg2-binary==2.9.10 flask-cors && \
         superset run -h 0.0.0.0 -p 8088
     environment:
       SUPERSET_SECRET_KEY: pdm-superset-secret
@@ -277,6 +277,7 @@ services:
       SUPERSET_ADMIN_FIRSTNAME: PDM
       SUPERSET_ADMIN_LASTNAME: Admin
       SUPERSET_ADMIN_EMAIL: admin@local
+      SUPERSET_CONFIG_PATH: /app/dashboard/superset/superset_config.py
     ports:
       - 8088:8088
     volumes:
@@ -293,7 +294,7 @@ services:
       - /bin/bash
       - -lc
       - |
-        pip install --no-cache-dir psycopg2-binary==2.9.10 && \
+        pip install --no-cache-dir psycopg2-binary==2.9.10 flask-cors && \
         sed -i 's/\r$//' /app/dashboard/superset/init_superset.sh && \
         bash /app/dashboard/superset/init_superset.sh && \
         python /app/dashboard/superset/bootstrap_dashboard.py && \
@@ -308,6 +309,7 @@ services:
       SUPERSET_ADMIN_FIRSTNAME: PDM
       SUPERSET_ADMIN_LASTNAME: Admin
       SUPERSET_ADMIN_EMAIL: admin@local
+      SUPERSET_CONFIG_PATH: /app/dashboard/superset/superset_config.py
     volumes:
       - superset_home:/app/superset_home
       - ./dashboard/superset:/app/dashboard/superset
@@ -321,6 +323,9 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
     ports:
       - 3000:3000
     volumes:
