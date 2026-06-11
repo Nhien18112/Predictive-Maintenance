@@ -1,0 +1,26 @@
+#
+# A fatal error has been detected by the Java Runtime Environment:
+#
+#  SIGBUS (0x7) at pc=0x00007698562444d4, pid=1, tid=332
+#
+# JRE version: OpenJDK Runtime Environment Temurin-11.0.22+7 (11.0.22+7) (build 11.0.22+7)
+# Java VM: OpenJDK 64-Bit Server VM Temurin-11.0.22+7 (11.0.22+7, mixed mode, sharing, tiered, compressed oops, g1 gc, linux-amd64)
+# Problematic frame:
+# C  [libc.so.6+0x9f4d4]  __strerror_r+0x44
+#
+# No core dump will be written. 
+#
+# If you would like to submit a bug report, please visit:
+#   https://github.com/adoptium/adoptium-support/issues
+# The crash happened outside the Java Virtual Machine in native code.
+# See problematic frame for where to report the bug.
+#
+
+---------------  S U M M A R Y ------------
+
+Command Line: -Xmx1g 
+[error occurred during error reporting (printing VM option summary), id 0x7, SIGBUS (0x7) at pc=0x000076985632d947]
+
+Host: Intel(R) Core(TM) i3-10105F CPU @ 3.70GHz, 
+[error occurred during error reporting (printing summary machine and OS info), id 0x7, SIGBUS (0x7) at pc=0x000076985623d626]
+
