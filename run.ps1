@@ -8,7 +8,7 @@ param(
         "up-ops", "down-ops",
         "up-dashboard", "down-dashboard", "refresh-superset",
         "build-train-silver-gold", "down-train",
-        "up-all", "down-all", "up-phm", "down-phm", "train-phm", "clean-phm",
+        "up-all", "down-all", "up-phm", "down-phm", "train-phm", "clean-phm", "train-nasa",
         "replay", "replay-phm",
         "consume-raw", "consume-dlq",
         "logs", "status", "health",
@@ -731,6 +731,25 @@ switch ($NormalizedAction) {
         
         Write-Step "Training PHM LSTM model"
         Run-TrainPhmWithRetry -PythonExe $pythonExe -MaxRetries 3
+    }
+    "train-nasa" {
+        if (-not (Test-Path $RawStreamingCsv)) {
+            Write-Step "Holdout CSV missing; running split-train-stream first"
+            & $PSCommandPath -Action split-train-stream -TrainRatio $TrainRatio -SplitSeed $SplitSeed
+        }
+        $imageName = "pdm-ops-eval"
+        if (-not (docker image inspect $imageName 2>$null)) {
+            Write-Step "Building Docker image $imageName (tensorflow-cpu)"
+            Invoke-Checked { docker build -f Dockerfile.ops -t $imageName . } "Docker build failed"
+        }
+        Write-Step "Training NASA FD001 LSTM (unit-level validation + holdout metrics)"
+        Invoke-Checked {
+            docker run --rm `
+                -v "${PSScriptRoot}:/app" `
+                -w /app `
+                -e TF_ENABLE_ONEDNN_OPTS=0 `
+                $imageName python scripts/train_nasa_model.py --force
+        } "NASA LSTM training failed"
     }
     "up-dashboard" {
         Compose-UpCore

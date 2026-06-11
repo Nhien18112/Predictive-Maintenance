@@ -4,15 +4,24 @@ import subprocess
 import glob
 import time
 
+def _ensure_training_deps() -> None:
+    """MLflow 2.11.x still imports pkg_resources (setuptools) on Python 3.12+."""
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "setuptools<71", "xgboost", "scikit-learn", "mlflow", "requests", "pandas", "numpy", "scipy"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 try:
     import xgboost as xgb
     import mlflow
     import mlflow.xgboost
     from sklearn.preprocessing import RobustScaler
     from sklearn.model_selection import train_test_split
-except ImportError:
-    print("Installing required dependencies: xgboost, scikit-learn, mlflow...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "xgboost", "scikit-learn", "mlflow", "requests", "pandas", "numpy", "scipy"])
+except (ImportError, ModuleNotFoundError):
+    print("Installing required dependencies: setuptools, xgboost, scikit-learn, mlflow...")
+    _ensure_training_deps()
     import xgboost as xgb
     import mlflow
     import mlflow.xgboost

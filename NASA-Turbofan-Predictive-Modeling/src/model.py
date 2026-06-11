@@ -16,5 +16,9 @@ def create_lstm_model(input_shape):
     # Output
     model.add(Dense(units=1, activation='linear'))
     
-    model.compile(loss='mean_squared_error', optimizer='adam', metrics=['root_mean_squared_error'])
+    model.compile(
+        loss='mean_squared_error',
+        optimizer='adam',
+        metrics=['mae', 'root_mean_squared_error'],
+    )
     return model

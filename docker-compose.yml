@@ -271,6 +271,7 @@ services:
         superset run -h 0.0.0.0 -p 8088
     environment:
       SUPERSET_SECRET_KEY: pdm-superset-secret
+      SQLALCHEMY_DATABASE_URI: "postgresql+psycopg2://pdm:pdm@dashboard-db:5432/pdm_dashboard"
       SUPERSET_LOAD_EXAMPLES: "no"
       SUPERSET_ADMIN_USERNAME: admin
       SUPERSET_ADMIN_PASSWORD: admin
@@ -303,6 +304,7 @@ services:
         python /app/dashboard/superset/bootstrap_charts_phm.py
     environment:
       SUPERSET_SECRET_KEY: pdm-superset-secret
+      SQLALCHEMY_DATABASE_URI: "postgresql+psycopg2://pdm:pdm@dashboard-db:5432/pdm_dashboard"
       SUPERSET_LOAD_EXAMPLES: "no"
       SUPERSET_ADMIN_USERNAME: admin
       SUPERSET_ADMIN_PASSWORD: admin
